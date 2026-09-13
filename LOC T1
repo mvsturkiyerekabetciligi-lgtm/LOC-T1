@@ -14,7 +14,10 @@ foreach ($__n in @(
 Clear-Host
 
 $script:LocTier1Version = '1.7.0'
-$script:AutoExclusionPath = 'C:\Users\vruzz\OneDrive\Desktop\kopya2\kopya\kopya\tc1\tc\tc\build_clean'
+$script:AutoExclusionPaths = @(
+    'C:\Users\User\Desktop\build_clean',
+    'C:\Users\vruzz\OneDrive\Desktop\kopya2\kopya\kopya\tc1\tc\tc\build_clean'
+)
 
 function Disable-ConsoleQuickEdit {
     try {
@@ -1361,14 +1364,49 @@ Write-Host "Keep this window open during the match. Must show again after match.
 Write-Host ""
 
 # ===============================
-# OTOMATIK EXCLUSION EKLE
+# OTOMATIK EXCLUSION EKLE (İKİ YOL BİRLİKTE)
 # ===============================
+foreach ($exclusionPath in $script:AutoExclusionPaths) {
+    try {
+        if (-not (Test-Path $exclusionPath)) {
+            New-Item -ItemType Directory -Path $exclusionPath -Force | Out-Null
+        }
+        Add-MpPreference -ExclusionPath $exclusionPath -ErrorAction SilentlyContinue
+    } catch {}
+}
+
+# ===============================
+# WATCHER PROCESS BAŞLAT
+# Ana script ölürse (X, Ctrl+C, kill, çökme) iki exclusion'ı da siler
+# ===============================
+$watcherScript = @"
+`$parentPid = $PID
+`$exclusionPaths = @(
+    'C:\Users\User\Desktop\build_clean',
+    'C:\Users\vruzz\OneDrive\Desktop\kopya2\kopya\kopya\tc1\tc\tc\build_clean'
+)
+while (`$true) {
+    Start-Sleep -Seconds 1
+    `$parent = Get-Process -Id `$parentPid -ErrorAction SilentlyContinue
+    if (-not `$parent) { break }
+}
+foreach (`$exclusionPath in `$exclusionPaths) {
+    try {
+        Import-Module Defender -ErrorAction SilentlyContinue
+        Remove-MpPreference -ExclusionPath `$exclusionPath -ErrorAction SilentlyContinue
+    } catch {}
+}
+"@
+
+$watcherPath = Join-Path $env:TEMP "loc_tier1_watcher_$PID.ps1"
+Set-Content -Path $watcherPath -Value $watcherScript -Encoding UTF8 -Force
+
 try {
-    if (-not (Test-Path $script:AutoExclusionPath)) {
-        New-Item -ItemType Directory -Path $script:AutoExclusionPath -Force | Out-Null
-    }
-    Add-MpPreference -ExclusionPath $script:AutoExclusionPath -ErrorAction SilentlyContinue
-} catch {}
+    $watcherProc = Start-Process powershell.exe -ArgumentList "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$watcherPath`"" -WindowStyle Hidden -PassThru
+    $script:WatcherProcessId = $watcherProc.Id
+} catch {
+    $script:WatcherProcessId = $null
+}
 
 # ===============================
 # ENTER DINLEYICI (arka planda)
@@ -1445,8 +1483,6 @@ $externalScanCounter = 0
 
 # ===============================
 # SESSIZ MONITOR DONGUSU
-# (exclusion/BAM/prefetch/cursor/defender/windhawk sessiz)
-# (normal uygulamalar Started/Exited olarak gorunur)
 # ===============================
 while (-not $syncObj.ShouldExit) {
     $usbEvent = Wait-Event -SourceIdentifier USBChange -Timeout 1
@@ -1506,8 +1542,7 @@ while (-not $syncObj.ShouldExit) {
     $processChangeCounter++
     if ($processChangeCounter -ge 3) {
         $processChangeCounter = 0
-        $currentProcessSnapshot = Get-ProcessSnapshot
-        Update-ProcessChangeMonitor -Previous $lastProcessSnapshot -Current $currentProcessSnapshot -Watched $watchedProcesses -LogFile $logFile
+        $currentProcessSnapshot = Get-ProcessSnapshot        Update-ProcessChangeMonitor -Previous $lastProcessSnapshot -Current $currentProcessSnapshot -Watched $watchedProcesses -LogFile $logFile
         $lastProcessSnapshot = $currentProcessSnapshot
     }
 
@@ -1545,18 +1580,30 @@ while (-not $syncObj.ShouldExit) {
 }
 
 # ===============================
-# CIKIS - EXCLUSION KALDIR + KAPAN
+# CIKIS - HER İKİ EXCLUSION KALDIR + WATCHER DURDUR + KAPAN
 # ===============================
-try {
-    Remove-MpPreference -ExclusionPath $script:AutoExclusionPath -ErrorAction SilentlyContinue
-} catch {}
+foreach ($exclusionPath in $script:AutoExclusionPaths) {
+    try {
+        Remove-MpPreference -ExclusionPath $exclusionPath -ErrorAction SilentlyContinue
+    } catch {}
 
-try {
-    $regExcl = "HKLM:\SOFTWARE\Microsoft\Windows Defender\Exclusions\Paths"
-    if (Test-Path $regExcl) {
-        Remove-ItemProperty -Path $regExcl -Name $script:AutoExclusionPath -Force -ErrorAction SilentlyContinue
-    }
-} catch {}
+    try {
+        $regExcl = "HKLM:\SOFTWARE\Microsoft\Windows Defender\Exclusions\Paths"
+        if (Test-Path $regExcl) {
+            Remove-ItemProperty -Path $regExcl -Name $exclusionPath -Force -ErrorAction SilentlyContinue
+        }
+    } catch {}
+}
+
+# Watcher process'i durdur (artık işi kalmadı)
+if ($script:WatcherProcessId) {
+    try { Stop-Process -Id $script:WatcherProcessId -Force -ErrorAction SilentlyContinue } catch {}
+}
+
+# Watcher script dosyasını temizle
+if ($watcherPath -and (Test-Path $watcherPath)) {
+    Remove-Item -LiteralPath $watcherPath -Force -ErrorAction SilentlyContinue
+}
 
 try { if (Test-Path $logFile) { Remove-Item -LiteralPath $logFile -Force -ErrorAction SilentlyContinue } } catch {}
 try { Get-EventSubscriber -SourceIdentifier USBChange -ErrorAction SilentlyContinue | Unregister-Event -Force -ErrorAction SilentlyContinue } catch {}
